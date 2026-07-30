@@ -1,0 +1,6 @@
+{
+  "name": "Bayer Attractor Grid & Parallelogram Shadows",
+  "description": "Grasshopper-style attractor field with customizable Bayer dithering (2x2, 4x4, 8x8) in 4 blue shades and 45-degree parallelogram shadow projections, with live Python export for PyCharm.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
