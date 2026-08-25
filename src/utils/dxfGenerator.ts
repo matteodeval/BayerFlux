@@ -6,6 +6,7 @@ import {
   subtractConvexPolygons,
   Polygon2D,
 } from './geometry';
+import { getBayerMatrix, applyBayerDither } from './bayer';
 
 /**
  * Generates a fully compliant ASCII DXF file (AC1009 / DXF R12 standard)
@@ -38,42 +39,26 @@ export function generateDXF(config: AppConfig): string {
     clipShadowsToGrid,
   } = config;
 
-  // 1. Calculate Shade Grid
-  const sampledCurvePoints = sampleCurve(curvePreset, controlPoints);
+  // 1. Calculate Shade Grid — must use the EXACT same function as the on-screen
+  // preview (Canvas2D.tsx) and PNG export, or the DXF silently diverges from
+  // what the person designed. A previous version of this file reimplemented
+  // its own approximate blend formula here instead of reusing bayer.ts;
+  // that produced a different shade on ~65% of cells even with identical
+  // settings, regardless of invertAttractor.
+  const sampledCurvePoints = sampleCurve(curvePreset, controlPoints, 100);
+  const bayerMatrix = getBayerMatrix(bayerSize);
   const shadeGrid: number[][] = [];
-
-  const bayer2 = [[0, 2], [3, 1]];
-  const bayer4 = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-  ];
 
   for (let gy = 0; gy < gridHeight; gy++) {
     const row: number[] = [];
     for (let gx = 0; gx < gridWidth; gx++) {
       const dist = getMinDistanceToCurve(gx, gy, gridWidth, gridHeight, sampledCurvePoints);
-      let normDist = Math.min(1.0, dist / attractorRadius);
-      let t = Math.pow(normDist, falloffPower);
-      if (invertAttractor) t = 1.0 - t;
+      let normDist = Math.min(Math.max(dist / attractorRadius, 0), 1);
+      normDist = Math.pow(normDist, falloffPower);
+      if (invertAttractor) normDist = 1 - normDist;
 
-      let bValue = 0.5;
-      if (bayerSize === 2) {
-        bValue = (bayer2[gy % 2][gx % 2] + 0.5) / 4.0;
-      } else if (bayerSize === 4) {
-        bValue = (bayer4[gy % 4][gx % 4] + 0.5) / 16.0;
-      } else if (bayerSize === 8) {
-        const b4 = bayer4[(gy % 4)][(gx % 4)];
-        const b2 = bayer2[Math.floor((gy % 8) / 4)][Math.floor((gx % 8) / 4)];
-        bValue = (4 * b4 + b2 + 0.5) / 64.0;
-      }
-
-      const blended = t * (1.0 - bayerStrength) + bValue * bayerStrength;
-      let shadeIdx = Math.floor(blended * 4);
-      if (shadeIdx < 0) shadeIdx = 0;
-      if (shadeIdx > 3) shadeIdx = 3;
-      row.push(shadeIdx);
+      const shadeLevel = applyBayerDither(normDist, gx, gy, bayerMatrix, bayerStrength, 4);
+      row.push(shadeLevel);
     }
     shadeGrid.push(row);
   }
