@@ -4,8 +4,9 @@ import { Header } from './components/Header';
 import { ControlsPanel } from './components/ControlsPanel';
 import { Canvas2D } from './components/Canvas2D';
 import { PythonCodeModal } from './components/PythonCodeModal';
-import { sampleCurve, getMinDistanceToCurve, getProjectionOffset } from './utils/geometry';
+import { sampleCurve, getMinDistanceToCurve, computeMergedShadowPolygons } from './utils/geometry';
 import { getBayerMatrix, applyBayerDither } from './utils/bayer';
+import { downloadDXF } from './utils/dxfGenerator';
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
@@ -13,6 +14,10 @@ export default function App() {
 
   const handleUpdateConfig = (updated: Partial<AppConfig>) => {
     setConfig((prev) => ({ ...prev, ...updated }));
+  };
+
+  const handleExportDXF = () => {
+    downloadDXF(config, `bayer_attractor_${config.gridWidth}x${config.gridHeight}.dxf`);
   };
 
   // Export High Resolution PNG Image
@@ -68,42 +73,41 @@ export default function App() {
 
     // 2. Draw 45° Parallelogram Shadow Projections
     if (config.shadowEnabled) {
-      const { shiftX, shiftY } = getProjectionOffset(
+      const lightestColorHex = config.shadowColorOverride || config.palette[3] || '#eaf4fe';
+      const shadowStrokeColor = config.palette[0] || '#031b33';
+
+      const shadowPolygons = computeMergedShadowPolygons(
+        config.gridWidth,
+        config.gridHeight,
+        shadeGrid,
+        config.shadowTarget,
+        config.projectionAngle,
         config.diagonalLength,
         cellSize,
-        config.projectionAngle
+        0,
+        0,
+        config.mergeShadows ?? true,
+        config.maxPlankLength ?? 4,
+        config.staggerParquet ?? true,
+        config.clipShadowsToGrid ?? true
       );
-      const lightestColorHex = config.palette[3] || '#eaf4fe';
 
       ctx.save();
-      ctx.globalAlpha = config.shadowOpacity;
+      ctx.fillStyle = lightestColorHex;
+      ctx.strokeStyle = shadowStrokeColor;
+      ctx.lineWidth = Math.max(0.6, cellSize * 0.04);
 
-      for (let gy = 0; gy < config.gridHeight; gy++) {
-        for (let gx = 0; gx < config.gridWidth; gx++) {
-          if (shadeGrid[gy][gx] === 3) {
-            const px = gx * cellSize;
-            const py = gy * cellSize;
-
-            const p1 = { x: px, y: py + cellSize };
-            const p2 = { x: px + cellSize, y: py + cellSize };
-            const p3 = { x: p2.x + shiftX, y: p2.y + shiftY };
-            const p4 = { x: p1.x + shiftX, y: p1.y + shiftY };
-
-            ctx.beginPath();
-            ctx.moveTo(p1.x, p1.y);
-            ctx.lineTo(p2.x, p2.y);
-            ctx.lineTo(p3.x, p3.y);
-            ctx.lineTo(p4.x, p4.y);
-            ctx.closePath();
-
-            ctx.fillStyle = lightestColorHex;
-            ctx.fill();
-
-            ctx.strokeStyle = lightestColorHex;
-            ctx.lineWidth = 0.5;
-            ctx.stroke();
-          }
+      for (const poly of shadowPolygons) {
+        if (!poly.points || poly.points.length < 3) continue;
+        ctx.beginPath();
+        ctx.moveTo(poly.points[0].x, poly.points[0].y);
+        for (let i = 1; i < poly.points.length; i++) {
+          ctx.lineTo(poly.points[i].x, poly.points[i].y);
         }
+        ctx.closePath();
+
+        ctx.fill();
+        ctx.stroke();
       }
       ctx.restore();
     }
@@ -119,18 +123,44 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-950 font-sans text-slate-100 overflow-hidden">
+    <div className="flex flex-col h-screen w-screen bg-[#1E1E1E] font-sans text-[#D4D4D4] overflow-hidden">
       <Header
         config={config}
         onUpdateConfig={handleUpdateConfig}
         onOpenPythonModal={() => setIsPythonModalOpen(true)}
         onExportImage={handleExportPNG}
+        onExportDXF={handleExportDXF}
       />
 
-      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative bg-[#1E1E1E]">
         <ControlsPanel config={config} onUpdateConfig={handleUpdateConfig} />
         <Canvas2D config={config} onUpdateConfig={handleUpdateConfig} />
       </main>
+
+      {/* High Density IDE Status Bar Footer */}
+      <footer className="h-6 bg-[#007ACC] text-white px-3 flex items-center justify-between text-[11px] font-mono shrink-0 select-none z-30">
+        <div className="flex items-center gap-4">
+          <span className="flex items-center gap-1.5 font-bold">
+            <span className="w-2 h-2 rounded-full bg-[#27C93F] animate-pulse"></span>
+            PyCharm / Grasshopper Ready
+          </span>
+          <span className="hidden sm:inline text-white/80">
+            Grid: {config.gridWidth}x{config.gridHeight} ({config.gridWidth * config.gridHeight} cells)
+          </span>
+          <span className="hidden md:inline text-white/80">
+            Bayer: {config.bayerSize}x{config.bayerSize} Matrix
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="text-white/90">
+            Shadows: {config.shadowEnabled ? `ON (${config.diagonalLength}d @ 45°)` : 'OFF'}
+          </span>
+          <span className="bg-[#005a9e] px-1.5 py-0.5 rounded text-[10px] font-bold">
+            Python 3.11 / Rhino 8
+          </span>
+        </div>
+      </footer>
 
       <PythonCodeModal
         config={config}

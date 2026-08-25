@@ -6,7 +6,8 @@ import {
   sampleCurve,
   getMinDistanceToCurve,
   getProjectionOffset,
-  getParallelogramVertices
+  getParallelogramVertices,
+  computeMergedShadowPolygons
 } from '../utils/geometry';
 
 interface Canvas2DProps {
@@ -48,7 +49,7 @@ export const Canvas2D: React.FC<Canvas2DProps> = ({ config, onUpdateConfig }) =>
     const height = rect.height;
 
     // Clear background
-    ctx.fillStyle = '#020617'; // slate-950
+    ctx.fillStyle = '#1E1E1E'; // High density dark editor background
     ctx.fillRect(0, 0, width, height);
 
     // Grid size & cell size math
@@ -122,59 +123,46 @@ export const Canvas2D: React.FC<Canvas2DProps> = ({ config, onUpdateConfig }) =>
       }
     }
 
-    // 2. RENDER 45° PARALLELOGRAM SHADOW PROJECTIONS
+    // 2. RENDER 45° PARALLELOGRAM SHADOW PROJECTIONS (100% OPAQUE - PARQUET MERGE)
     if (shadowEnabled) {
-      const { shiftX, shiftY } = getProjectionOffset(diagonalLength, cellSize, projectionAngle);
+      const lightestColorHex = config.shadowColorOverride || palette[3] || '#eaf4fe';
+      const shadowStrokeColor = palette[0] || '#031b33';
 
-      const lightestColorHex = palette[3] || '#eaf4fe';
+      const shadowPolygons = computeMergedShadowPolygons(
+        gridWidth,
+        gridHeight,
+        shadeGrid,
+        config.shadowTarget,
+        projectionAngle,
+        diagonalLength,
+        cellSize,
+        startX,
+        startY,
+        config.mergeShadows ?? true,
+        config.maxPlankLength ?? 4,
+        config.staggerParquet ?? true,
+        config.clipShadowsToGrid ?? true
+      );
 
       ctx.save();
-      ctx.globalAlpha = shadowOpacity;
+      // 100% Opaque fill - directly transforms tile colors
+      ctx.fillStyle = lightestColorHex;
+      ctx.strokeStyle = shadowStrokeColor;
+      ctx.lineWidth = Math.max(0.6, cellSize * 0.04);
 
-      for (let gy = 0; gy < gridHeight; gy++) {
-        for (let gx = 0; gx < gridWidth; gx++) {
-          const shadeIdx = shadeGrid[gy][gx];
-
-          // Check if cell qualifies for shadow projection
-          let shouldProject = false;
-          if (config.shadowTarget === 'lightest_only' && shadeIdx === 3) {
-            shouldProject = true;
-          } else if (config.shadowTarget === 'darkest_only' && shadeIdx === 0) {
-            shouldProject = true;
-          } else if (config.shadowTarget === 'all_weighted') {
-            shouldProject = true;
-          }
-
-          if (shouldProject) {
-            const px = startX + gx * cellSize;
-            const py = startY + gy * cellSize;
-
-            // Bottom edge vertices
-            const p1 = { x: px, y: py + cellSize }; // Bottom-Left
-            const p2 = { x: px + cellSize, y: py + cellSize }; // Bottom-Right
-
-            // Projected vertices at 45 degrees
-            const p3 = { x: p2.x + shiftX, y: p2.y + shiftY };
-            const p4 = { x: p1.x + shiftX, y: p1.y + shiftY };
-
-            ctx.beginPath();
-            ctx.moveTo(p1.x, p1.y);
-            ctx.lineTo(p2.x, p2.y);
-            ctx.lineTo(p3.x, p3.y);
-            ctx.lineTo(p4.x, p4.y);
-            ctx.closePath();
-
-            // Fill with lightest color / override
-            ctx.fillStyle = config.shadowColorOverride || lightestColorHex;
-            ctx.fill();
-
-            // Subtle outline for architectural clarity
-            ctx.strokeStyle = lightestColorHex;
-            ctx.lineWidth = Math.max(0.5, cellSize * 0.05);
-            ctx.stroke();
-          }
+      for (const poly of shadowPolygons) {
+        if (!poly.points || poly.points.length < 3) continue;
+        ctx.beginPath();
+        ctx.moveTo(poly.points[0].x, poly.points[0].y);
+        for (let i = 1; i < poly.points.length; i++) {
+          ctx.lineTo(poly.points[i].x, poly.points[i].y);
         }
+        ctx.closePath();
+
+        ctx.fill();
+        ctx.stroke();
       }
+
       ctx.restore();
     }
 
@@ -334,7 +322,7 @@ export const Canvas2D: React.FC<Canvas2DProps> = ({ config, onUpdateConfig }) =>
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 bg-slate-950 overflow-hidden flex items-center justify-center select-none"
+      className="relative flex-1 bg-[#1E1E1E] overflow-hidden flex items-center justify-center select-none"
     >
       <canvas
         ref={canvasRef}
@@ -346,38 +334,38 @@ export const Canvas2D: React.FC<Canvas2DProps> = ({ config, onUpdateConfig }) =>
       />
 
       {/* Floating Canvas Toolbar */}
-      <div className="absolute top-4 right-4 flex items-center gap-1.5 bg-slate-900/90 backdrop-blur-md p-1.5 rounded-xl border border-slate-800 shadow-xl z-10 text-slate-300 text-xs">
+      <div className="absolute top-3 right-3 flex items-center gap-1 bg-[#252526] p-1 rounded border border-[#333333] shadow-lg z-10 text-[#D4D4D4] text-xs font-mono">
         <button
           onClick={() => setZoom((z) => Math.min(z + 0.2, 4.0))}
-          className="p-1.5 hover:bg-slate-800 rounded-lg transition"
+          className="p-1 hover:bg-[#37373D] rounded transition"
           title="Ingrandisci"
         >
-          <ZoomIn className="w-4 h-4" />
+          <ZoomIn className="w-3.5 h-3.5" />
         </button>
         <button
           onClick={() => setZoom((z) => Math.max(z - 0.2, 0.4))}
-          className="p-1.5 hover:bg-slate-800 rounded-lg transition"
+          className="p-1 hover:bg-[#37373D] rounded transition"
           title="Riduci"
         >
-          <ZoomOut className="w-4 h-4" />
+          <ZoomOut className="w-3.5 h-3.5" />
         </button>
         <button
           onClick={() => {
             setZoom(1.0);
             setPan({ x: 0, y: 0 });
           }}
-          className="p-1.5 hover:bg-slate-800 rounded-lg transition"
+          className="p-1 hover:bg-[#37373D] rounded transition"
           title="Centra vista"
         >
-          <Maximize2 className="w-4 h-4" />
+          <Maximize2 className="w-3.5 h-3.5" />
         </button>
       </div>
 
       {/* Info Badge */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-800 text-[11px] text-slate-400 flex items-center gap-2">
-        <Info className="w-3.5 h-3.5 text-blue-400" />
+      <div className="absolute bottom-3 left-3 bg-[#252526]/90 backdrop-blur-sm px-2.5 py-1 rounded border border-[#333333] text-[10px] font-mono text-[#858585] flex items-center gap-2">
+        <Info className="w-3 h-3 text-[#007ACC]" />
         <span>
-          Trascina i punti di controllo <strong className="text-blue-300">P0-P3</strong> per muovere la curva attrattore
+          Trascina punti <strong className="text-[#007ACC]">P0-P3</strong> per muovere la curva attrattore
         </span>
       </div>
     </div>

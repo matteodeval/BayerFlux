@@ -178,3 +178,320 @@ export function getParallelogramVertices(
 
   return [p1, p2, p3, p4];
 }
+
+export interface Polygon2D {
+  points: Point2D[];
+}
+
+/**
+ * Clips a convex/simple polygon against an axis-aligned bounding box [minX, minY, maxX, maxY]
+ * using the Sutherland-Hodgman algorithm.
+ */
+export function clipPolygonToBox(
+  points: Point2D[],
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number
+): Point2D[] {
+  let output = points;
+
+  const clipEdge = (
+    pts: Point2D[],
+    inside: (p: Point2D) => boolean,
+    intersect: (p1: Point2D, p2: Point2D) => Point2D
+  ): Point2D[] => {
+    if (pts.length === 0) return [];
+    const result: Point2D[] = [];
+    let s = pts[pts.length - 1];
+
+    for (const e of pts) {
+      if (inside(e)) {
+        if (inside(s)) {
+          result.push(e);
+        } else {
+          result.push(intersect(s, e));
+          result.push(e);
+        }
+      } else if (inside(s)) {
+        result.push(intersect(s, e));
+      }
+      s = e;
+    }
+    return result;
+  };
+
+  const eps = 1e-6;
+
+  // Left
+  output = clipEdge(
+    output,
+    (p) => p.x >= minX - eps,
+    (p1, p2) => ({
+      x: minX,
+      y: p1.y + ((p2.y - p1.y) * (minX - p1.x)) / (p2.x - p1.x || eps),
+    })
+  );
+  // Right
+  output = clipEdge(
+    output,
+    (p) => p.x <= maxX + eps,
+    (p1, p2) => ({
+      x: maxX,
+      y: p1.y + ((p2.y - p1.y) * (maxX - p1.x)) / (p2.x - p1.x || eps),
+    })
+  );
+  // Top
+  output = clipEdge(
+    output,
+    (p) => p.y >= minY - eps,
+    (p1, p2) => ({
+      x: p1.x + ((p2.x - p1.x) * (minY - p1.y)) / (p2.y - p1.y || eps),
+      y: minY,
+    })
+  );
+  // Bottom
+  output = clipEdge(
+    output,
+    (p) => p.y <= maxY + eps,
+    (p1, p2) => ({
+      x: p1.x + ((p2.x - p1.x) * (maxY - p1.y)) / (p2.y - p1.y || eps),
+      y: maxY,
+    })
+  );
+
+  return output;
+}
+
+/**
+ * Merges adjacent/overlapping 45° shadow projections along diagonal corridors
+ * into solid "parquet" long parallelograms, with optional staggered joint breaks and grid boundary clipping.
+ */
+export function computeMergedShadowPolygons(
+  gridWidth: number,
+  gridHeight: number,
+  shadeGrid: number[][],
+  shadowTarget: 'lightest_only' | 'all_weighted' | 'darkest_only',
+  projectionAngle: ProjectionAngle,
+  diagonalLength: number,
+  cellSize: number,
+  startX: number,
+  startY: number,
+  merge: boolean = true,
+  maxPlankLength: number = 4,
+  staggerParquet: boolean = true,
+  clipShadowsToGrid: boolean = true
+): Polygon2D[] {
+  const minX = startX;
+  const minY = startY;
+  const maxX = startX + gridWidth * cellSize;
+  const maxY = startY + gridHeight * cellSize;
+
+  // Discrete integer steps for grid diagonals
+  const intDiagLen = Math.max(1, Math.round(diagonalLength));
+
+  if (!merge) {
+    const polygons: Polygon2D[] = [];
+    const { shiftX, shiftY } = getProjectionOffset(intDiagLen, cellSize, projectionAngle);
+
+    for (let gy = 0; gy < gridHeight; gy++) {
+      for (let gx = 0; gx < gridWidth; gx++) {
+        const shadeIdx = shadeGrid[gy][gx];
+        let qualifies = false;
+        if (shadowTarget === 'lightest_only' && shadeIdx === 3) qualifies = true;
+        else if (shadowTarget === 'darkest_only' && shadeIdx === 0) qualifies = true;
+        else if (shadowTarget === 'all_weighted') qualifies = true;
+
+        if (qualifies) {
+          const px = startX + gx * cellSize;
+          const py = startY + gy * cellSize;
+          let p1: Point2D, p2: Point2D;
+
+          if (projectionAngle === 'left_up' || projectionAngle === 'right_up') {
+            p1 = { x: px, y: py + cellSize };
+            p2 = { x: px + cellSize, y: py + cellSize };
+          } else {
+            p1 = { x: px, y: py };
+            p2 = { x: px + cellSize, y: py };
+          }
+          const p3: Point2D = { x: p2.x + shiftX, y: p2.y + shiftY };
+          const p4: Point2D = { x: p1.x + shiftX, y: p1.y + shiftY };
+
+          let rawPts: Point2D[] = [p1, p2, p3, p4];
+          if (clipShadowsToGrid) {
+            rawPts = clipPolygonToBox(rawPts, minX, minY, maxX, maxY);
+          }
+          if (rawPts.length >= 3) {
+            polygons.push({ points: rawPts });
+          }
+        }
+      }
+    }
+    return polygons;
+  }
+
+  // Merged Parquet Mode:
+  const corridors: Map<number, { uMin: number; uMax: number }[]> = new Map();
+  const isVxPositive = projectionAngle === 'right_up' || projectionAngle === 'right_down';
+
+  for (let gy = 0; gy < gridHeight; gy++) {
+    for (let gx = 0; gx < gridWidth; gx++) {
+      const shadeIdx = shadeGrid[gy][gx];
+      let qualifies = false;
+      if (shadowTarget === 'lightest_only' && shadeIdx === 3) qualifies = true;
+      else if (shadowTarget === 'darkest_only' && shadeIdx === 0) qualifies = true;
+      else if (shadowTarget === 'all_weighted') qualifies = true;
+
+      if (!qualifies) continue;
+
+      let k: number;
+      if (projectionAngle === 'left_up' || projectionAngle === 'right_down') {
+        k = gx - gy;
+      } else {
+        k = gx + gy;
+      }
+      const u = gx;
+
+      let uMin: number, uMax: number;
+      if (!isVxPositive) {
+        uMin = u - intDiagLen;
+        uMax = u;
+      } else {
+        uMin = u;
+        uMax = u + intDiagLen;
+      }
+
+      if (!corridors.has(k)) {
+        corridors.set(k, []);
+      }
+      corridors.get(k)!.push({ uMin, uMax });
+    }
+  }
+
+  const resultPolygons: Polygon2D[] = [];
+  const s = cellSize;
+  const plankLen = Math.max(1, Math.round(maxPlankLength));
+  const staggerStep = Math.max(1, Math.floor(plankLen / 2));
+
+  corridors.forEach((intervals, k) => {
+    if (intervals.length === 0) return;
+
+    intervals.sort((a, b) => a.uMin - b.uMin);
+
+    // Step 1: Merge overlapping/contiguous shadow intervals
+    const merged: { uMin: number; uMax: number }[] = [];
+    let current = { ...intervals[0] };
+
+    for (let i = 1; i < intervals.length; i++) {
+      const next = intervals[i];
+      if (next.uMin <= current.uMax + 0.001) {
+        current.uMax = Math.max(current.uMax, next.uMax);
+      } else {
+        merged.push(current);
+        current = { ...next };
+      }
+    }
+    merged.push(current);
+
+    // Step 2: Split merged intervals into parquet planks with staggered joint breaks
+    const planks: { uMin: number; uMax: number }[] = [];
+    const offset = staggerParquet
+      ? ((k * staggerStep) % plankLen + plankLen) % plankLen
+      : 0;
+
+    for (const seg of merged) {
+      if (seg.uMax - seg.uMin <= plankLen) {
+        planks.push(seg);
+        continue;
+      }
+
+      // Find cut points inside (seg.uMin, seg.uMax)
+      // Cut formula: u_cut = offset + n * plankLen
+      const firstN = Math.ceil((seg.uMin - offset + 1e-6) / plankLen);
+      const cuts: number[] = [seg.uMin];
+
+      let n = firstN;
+      while (true) {
+        const uCut = offset + n * plankLen;
+        if (uCut >= seg.uMax - 1e-6) break;
+        if (uCut > seg.uMin + 1e-6) {
+          cuts.push(uCut);
+        }
+        n++;
+      }
+      cuts.push(seg.uMax);
+
+      for (let c = 0; c < cuts.length - 1; c++) {
+        if (cuts[c + 1] - cuts[c] > 1e-6) {
+          planks.push({ uMin: cuts[c], uMax: cuts[c + 1] });
+        }
+      }
+    }
+
+    // Step 3: Convert plank intervals to 2D polygon vertices & clip to grid box
+    for (const seg of planks) {
+      let p1: Point2D, p2: Point2D, p3: Point2D, p4: Point2D;
+
+      if (projectionAngle === 'left_up') {
+        const gxBase = seg.uMax;
+        const gyBase = seg.uMax - k;
+        const px = startX + gxBase * s;
+        const py = startY + (gyBase + 1) * s;
+
+        p1 = { x: px, y: py };
+        p2 = { x: px + s, y: py };
+
+        const shift = (seg.uMin - seg.uMax) * s;
+        p3 = { x: p2.x + shift, y: p2.y + shift };
+        p4 = { x: p1.x + shift, y: p1.y + shift };
+      } else if (projectionAngle === 'right_down') {
+        const gxBase = seg.uMin;
+        const gyBase = seg.uMin - k;
+        const px = startX + gxBase * s;
+        const py = startY + gyBase * s;
+
+        p1 = { x: px, y: py };
+        p2 = { x: px + s, y: py };
+
+        const shift = (seg.uMax - seg.uMin) * s;
+        p3 = { x: p2.x + shift, y: p2.y + shift };
+        p4 = { x: p1.x + shift, y: p1.y + shift };
+      } else if (projectionAngle === 'left_down') {
+        const gxBase = seg.uMax;
+        const gyBase = k - seg.uMax;
+        const px = startX + gxBase * s;
+        const py = startY + gyBase * s;
+
+        p1 = { x: px, y: py };
+        p2 = { x: px + s, y: py };
+
+        const dist = (seg.uMax - seg.uMin) * s;
+        p3 = { x: p2.x - dist, y: p2.y + dist };
+        p4 = { x: p1.x - dist, y: p1.y + dist };
+      } else { // right_up
+        const gxBase = seg.uMin;
+        const gyBase = k - seg.uMin;
+        const px = startX + gxBase * s;
+        const py = startY + (gyBase + 1) * s;
+
+        p1 = { x: px, y: py };
+        p2 = { x: px + s, y: py };
+
+        const dist = (seg.uMax - seg.uMin) * s;
+        p3 = { x: p2.x + dist, y: p2.y - dist };
+        p4 = { x: p1.x + dist, y: p1.y - dist };
+      }
+
+      let pts: Point2D[] = [p1, p2, p3, p4];
+      if (clipShadowsToGrid) {
+        pts = clipPolygonToBox(pts, minX, minY, maxX, maxY);
+      }
+
+      if (pts.length >= 3) {
+        resultPolygons.push({ points: pts });
+      }
+    }
+  });
+
+  return resultPolygons;
+}

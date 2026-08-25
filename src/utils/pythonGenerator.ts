@@ -64,12 +64,43 @@ def hex_to_rgb(hex_str):
     return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
 
 # ---------------------------------------------------------------------------
+# Polygon Clipping Helper (Sutherland-Hodgman)
+# ---------------------------------------------------------------------------
+def clip_polygon_to_box(pts, min_x, min_y, max_x, max_y):
+    if not pts:
+        return []
+    def clip_edge(points, inside, intersect):
+        if not points:
+            return []
+        res = []
+        s = points[-1]
+        for e in points:
+            if inside(e):
+                if inside(s):
+                    res.append(e)
+                else:
+                    res.append(intersect(s, e))
+                    res.append(e)
+            elif inside(s):
+                res.append(intersect(s, e))
+            s = e
+        return res
+
+    eps = 1e-6
+    output = pts
+    output = clip_edge(output, lambda p: p[0] >= min_x - eps, lambda p1, p2: (min_x, p1[1] + (p2[1] - p1[1]) * (min_x - p1[0]) / (p2[0] - p1[0] or eps)))
+    output = clip_edge(output, lambda p: p[0] <= max_x + eps, lambda p1, p2: (max_x, p1[1] + (p2[1] - p1[1]) * (max_x - p1[0]) / (p2[0] - p1[0] or eps)))
+    output = clip_edge(output, lambda p: p[1] >= min_y - eps, lambda p1, p2: (p1[0] + (p2[0] - p1[0]) * (min_y - p1[1]) / (p2[1] - p1[1] or eps), min_y))
+    output = clip_edge(output, lambda p: p[1] <= max_y + eps, lambda p1, p2: (p1[0] + (p2[0] - p1[0]) * (max_y - p1[1]) / (p2[1] - p1[1] or eps), max_y))
+    return output
+
+# ---------------------------------------------------------------------------
 # Main Application Class
 # ---------------------------------------------------------------------------
 class BayerAttractorApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bayer Attractor Grid & 45° Shadows (PyCharm)")
+        self.title("Bayer Attractor Grid & Parquet Shadows (PyCharm Studio)")
         self.geometry("1280x820")
         self.configure(bg="#0f172a")
 
@@ -78,7 +109,10 @@ class BayerAttractorApp(tk.Tk):
         self.grid_height = tk.IntVar(value=${config.gridHeight})
         self.bayer_size = tk.IntVar(value=${config.bayerSize})
         self.attractor_radius = tk.DoubleVar(value=${config.attractorRadius})
-        self.diagonal_length = tk.DoubleVar(value=${config.diagonalLength})
+        self.diagonal_length = tk.IntVar(value=${Math.round(config.diagonalLength)})
+        self.max_plank_length = tk.IntVar(value=${Math.round(config.maxPlankLength)})
+        self.stagger_parquet = tk.BooleanVar(value=${config.staggerParquet ? 'True' : 'False'})
+        self.clip_shadows = tk.BooleanVar(value=${config.clipShadowsToGrid ? 'True' : 'False'})
         self.projection_angle = tk.StringVar(value="${config.projectionAngle}")
         self.show_grid_lines = tk.BooleanVar(value=${config.showGridLines})
         self.show_curve = tk.BooleanVar(value=True)
@@ -283,37 +317,136 @@ class BayerAttractorApp(tk.Tk):
 
                 draw.rectangle([x1, y1, x2, y2], fill=self.palette_rgb[shade_idx])
 
-        # 2. Render 45° Parallelogram Shadow Projections for the Lightest Color
-        diag_len = self.diagonal_length.get()
-        d_px = diag_len * cell_size
+        # 2. Render 45° Parallelogram Shadow Projections (Solid Opaque - Parquet Merged & Staggered)
+        diag_len = int(self.diagonal_length.get())
+        max_plank_len = max(1, int(self.max_plank_length.get()))
+        stagger_step = max(1, max_plank_len // 2) if self.stagger_parquet.get() else 0
         angle = self.projection_angle.get()
 
-        if angle == "left_up":
-            sx, sy = -d_px, -d_px
-        elif angle == "left_down":
-            sx, sy = -d_px, d_px
-        elif angle == "right_up":
-            sx, sy = d_px, -d_px
-        else:
-            sx, sy = d_px, d_px
-
-        lightest_idx = 3 # The lightest background color
         lightest_rgb = self.palette_rgb[3]
-        shadow_fill = lightest_rgb + (180,) # semi-transparent projection
+        darkest_rgb = self.palette_rgb[0]
+
+        min_x = offset_x
+        min_y = offset_y
+        max_x = offset_x + gw * cell_size
+        max_y = offset_y + gh * cell_size
+
+        # Group contiguous intervals along 45° diagonal corridors
+        corridors = {}
+        is_vx_positive = angle in ("right_up", "right_down")
 
         for gy in range(gh):
             for gx in range(gw):
-                if grid_shades[gy][gx] == lightest_idx:
-                    x = offset_x + gx * cell_size
-                    y = offset_y + gy * cell_size
-                    
-                    # Bottom edge of square
-                    p1 = (x, y + cell_size)
-                    p2 = (x + cell_size, y + cell_size)
-                    p3 = (x + cell_size + sx, y + cell_size + sy)
-                    p4 = (x + sx, y + cell_size + sy)
+                if grid_shades[gy][gx] == 3: # Lightest color
+                    if angle in ("left_up", "right_down"):
+                        k = gx - gy
+                    else:
+                        k = gx + gy
+                    u = gx
 
-                    draw.polygon([p1, p2, p3, p4], fill=shadow_fill, outline=lightest_rgb)
+                    if not is_vx_positive:
+                        u_min = u - diag_len
+                        u_max = u
+                    else:
+                        u_min = u
+                        u_max = u + diag_len
+
+                    if k not in corridors:
+                        corridors[k] = []
+                    corridors[k].append((u_min, u_max))
+
+        s = cell_size
+        for k, intervals in corridors.items():
+            if not intervals:
+                continue
+            intervals.sort(key=lambda item: item[0])
+
+            # Merge contiguous intervals
+            merged = []
+            curr_min, curr_max = intervals[0]
+            for i in range(1, len(intervals)):
+                nxt_min, nxt_max = intervals[i]
+                if nxt_min <= curr_max + 0.001:
+                    curr_max = max(curr_max, nxt_max)
+                else:
+                    merged.append((curr_min, curr_max))
+                    curr_min, curr_max = nxt_min, nxt_max
+            merged.append((curr_min, curr_max))
+
+            # Split into parquet planks with staggered breaks
+            planks = []
+            offset = ((k * stagger_step) % max_plank_len + max_plank_len) % max_plank_len if self.stagger_parquet.get() else 0
+
+            for seg_min, seg_max in merged:
+                if seg_max - seg_min <= max_plank_len:
+                    planks.append((seg_min, seg_max))
+                    continue
+
+                import math
+                first_n = math.ceil((seg_min - offset + 1e-6) / max_plank_len)
+                cuts = [seg_min]
+                n = first_n
+                while True:
+                    u_cut = offset + n * max_plank_len
+                    if u_cut >= seg_max - 1e-6:
+                        break
+                    if u_cut > seg_min + 1e-6:
+                        cuts.append(u_cut)
+                    n += 1
+                cuts.append(seg_max)
+
+                for c in range(len(cuts) - 1):
+                    if cuts[c+1] - cuts[c] > 1e-6:
+                        planks.append((cuts[c], cuts[c+1]))
+
+            for seg_min, seg_max in planks:
+                if angle == "left_up":
+                    gx_base = seg_max
+                    gy_base = seg_max - k
+                    px = offset_x + gx_base * s
+                    py = offset_y + (gy_base + 1) * s
+                    p1 = (px, py)
+                    p2 = (px + s, py)
+                    shift = (seg_min - seg_max) * s
+                    p3 = (p2[0] + shift, p2[1] + shift)
+                    p4 = (p1[0] + shift, p1[1] + shift)
+                elif angle == "right_down":
+                    gx_base = seg_min
+                    gy_base = seg_min - k
+                    px = offset_x + gx_base * s
+                    py = offset_y + gy_base * s
+                    p1 = (px, py)
+                    p2 = (px + s, py)
+                    shift = (seg_max - seg_min) * s
+                    p3 = (p2[0] + shift, p2[1] + shift)
+                    p4 = (p1[0] + shift, p1[1] + shift)
+                elif angle == "left_down":
+                    gx_base = seg_max
+                    gy_base = k - seg_max
+                    px = offset_x + gx_base * s
+                    py = offset_y + gy_base * s
+                    p1 = (px, py)
+                    p2 = (px + s, py)
+                    dist = (seg_max - seg_min) * s
+                    p3 = (p2[0] - dist, p2[1] + dist)
+                    p4 = (p1[0] - dist, p1[1] + dist)
+                else: # right_up
+                    gx_base = seg_min
+                    gy_base = k - seg_min
+                    px = offset_x + gx_base * s
+                    py = offset_y + (gy_base + 1) * s
+                    p1 = (px, py)
+                    p2 = (px + s, py)
+                    dist = (seg_max - seg_min) * s
+                    p3 = (p2[0] + dist, p2[1] - dist)
+                    p4 = (p1[0] + dist, p1[1] - dist)
+
+                raw_pts = [p1, p2, p3, p4]
+                if self.clip_shadows.get():
+                    raw_pts = clip_polygon_to_box(raw_pts, min_x, min_y, max_x, max_y)
+
+                if len(raw_pts) >= 3:
+                    draw.polygon(raw_pts, fill=lightest_rgb, outline=darkest_rgb)
 
         # 3. Optional Grid Lines
         if self.show_grid_lines.get():

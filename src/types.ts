@@ -32,10 +32,12 @@ export interface AppConfig {
 
   // 45° Parallelogram Shadow Projection
   shadowEnabled: boolean;
-  diagonalLength: number; // Length in terms of square diagonals (e.g. 1.0 to 10.0, default 3.0)
+  diagonalLength: number; // Length in terms of square diagonals (e.g. 1 to 10 integer steps)
   projectionAngle: ProjectionAngle;
-  shadowOpacity: number; // 0.0 to 1.0
-  shadowFillMode: 'fill' | 'stroke' | 'both';
+  mergeShadows: boolean; // Combine adjacent 45° shadows into unified parquet planks
+  maxPlankLength: number; // Max length in grid units for parquet planks (e.g. 2, 3, 4, 5, 6)
+  staggerParquet: boolean; // Offset joints across adjacent diagonal corridors (parquet pattern)
+  clipShadowsToGrid: boolean; // Clip long projected shadows to the grid boundary
   shadowTarget: 'lightest_only' | 'all_weighted' | 'darkest_only';
   shadowColorOverride: string | null; // null uses the lightest background color (#eaf4fe)
 
@@ -90,10 +92,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   presetPaletteName: DEFAULT_BLUE_PALETTES[0].name,
 
   shadowEnabled: true,
-  diagonalLength: 3.0, // length = 3 diagonals of square as requested
+  diagonalLength: 3, // integer step = 3 diagonals as requested
   projectionAngle: 'left_up',
-  shadowOpacity: 0.85,
-  shadowFillMode: 'fill',
+  mergeShadows: true,
+  maxPlankLength: 4, // 4 grid units max plank length
+  staggerParquet: true, // staggered parquet joints
+  clipShadowsToGrid: true, // clip at grid boundaries
   shadowTarget: 'lightest_only',
   shadowColorOverride: null,
 
