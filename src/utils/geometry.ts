@@ -495,3 +495,115 @@ export function computeMergedShadowPolygons(
 
   return resultPolygons;
 }
+
+// ---------------------------------------------------------------------------
+// Convex polygon boolean subtraction
+// ---------------------------------------------------------------------------
+// Used to turn the visual "shadow tiles painted over the mosaic" (correct as
+// a raster, since paint order alone makes the top layer appear to replace
+// the one below) into a true non-overlapping planar tessellation for vector
+// export (DXF): every base grid square that a parquet plank overlaps must
+// have that area actually removed from its own boundary, not just covered.
+
+function polygonSignedArea(points: Point2D[]): number {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+    area += p1.x * p2.y - p2.x * p1.y;
+  }
+  return area / 2;
+}
+
+function ensureCCW(points: Point2D[]): Point2D[] {
+  return polygonSignedArea(points) < 0 ? [...points].reverse() : points;
+}
+
+/**
+ * Clips `points` against the half-plane of the directed line a->b.
+ * keepLeft = true keeps the side that is convex-inside for a CCW polygon
+ * (standard Sutherland-Hodgman); keepLeft = false keeps the opposite side
+ * (used to carve out the "outside" slice for polygon subtraction).
+ */
+function clipHalfPlane(points: Point2D[], a: Point2D, b: Point2D, keepLeft: boolean): Point2D[] {
+  if (points.length === 0) return [];
+  const eps = 1e-9;
+  const dx1 = b.x - a.x;
+  const dy1 = b.y - a.y;
+
+  const side = (p: Point2D) => {
+    const cp = dx1 * (p.y - a.y) - dy1 * (p.x - a.x);
+    return keepLeft ? cp >= -eps : cp <= eps;
+  };
+
+  const intersect = (p1: Point2D, p2: Point2D): Point2D => {
+    const dx2 = p2.x - p1.x;
+    const dy2 = p2.y - p1.y;
+    const denom = dx1 * dy2 - dy1 * dx2;
+    if (Math.abs(denom) < 1e-12) return p2; // parallel edges, degenerate fallback
+    const numer = dy1 * (p1.x - a.x) - dx1 * (p1.y - a.y);
+    const u = numer / denom;
+    return { x: p1.x + u * dx2, y: p1.y + u * dy2 };
+  };
+
+  const result: Point2D[] = [];
+  let s = points[points.length - 1];
+  let sIn = side(s);
+  for (const e of points) {
+    const eIn = side(e);
+    if (eIn) {
+      if (!sIn) result.push(intersect(s, e));
+      result.push(e);
+    } else if (sIn) {
+      result.push(intersect(s, e));
+    }
+    s = e;
+    sIn = eIn;
+  }
+  return result;
+}
+
+/**
+ * Computes subject \ clip (subject minus clip) for two convex polygons,
+ * returning zero or more convex polygon fragments whose union is the part
+ * of `subject` not covered by `clip`. Both inputs may be given in either
+ * winding order. Standard "edge decomposition" technique: at each edge of
+ * the (CCW) clip polygon, split off the slice of the remaining subject that
+ * falls outside that edge's half-plane, then keep only the inside part for
+ * the next edge.
+ */
+export function subtractConvexPolygon(subject: Point2D[], clip: Point2D[]): Point2D[][] {
+  if (subject.length < 3) return [];
+  if (clip.length < 3) return [subject];
+
+  const subj = ensureCCW(subject);
+  const clp = ensureCCW(clip);
+
+  const pieces: Point2D[][] = [];
+  let current = subj;
+
+  for (let i = 0; i < clp.length; i++) {
+    if (current.length < 3) break;
+    const a = clp[i];
+    const b = clp[(i + 1) % clp.length];
+    const outside = clipHalfPlane(current, a, b, false);
+    if (outside.length >= 3) pieces.push(outside);
+    current = clipHalfPlane(current, a, b, true);
+  }
+  return pieces;
+}
+
+/** Subtracts several convex clip polygons from a subject polygon in turn. */
+export function subtractConvexPolygons(subject: Point2D[], clips: Point2D[][]): Point2D[][] {
+  let pieces: Point2D[][] = [subject];
+  for (const clip of clips) {
+    if (pieces.length === 0) break;
+    const next: Point2D[][] = [];
+    for (const piece of pieces) {
+      next.push(...subtractConvexPolygon(piece, clip));
+    }
+    pieces = next;
+  }
+  return pieces;
+}
+
